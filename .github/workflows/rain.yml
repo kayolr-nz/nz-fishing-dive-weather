@@ -1,0 +1,51 @@
+name: Rain pictures
+
+# Every 6 hours, ~4 h after each ICON run (00/06/12/18 UTC) has finished on DWD's server.
+on:
+  schedule:
+    - cron: "20 4,10,16,22 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write # only for the keep-alive commit below
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  rain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Make the rain pictures
+        run: node make-rain.mjs
+      - name: Add the front page
+        run: cp index.html out/ && touch out/.nojekyll
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: out
+      - id: deploy
+        uses: actions/deploy-pages@v4
+      # GitHub switches off schedules in public repos after 60 days without commits: commit a date every ~3 weeks
+      - name: Keep the schedule alive
+        run: |
+          last=$(cat keepalive.txt 2>/dev/null || echo 0)
+          now=$(date +%s)
+          if [ $((now - last)) -gt 1814400 ]; then
+            echo $now > keepalive.txt
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add keepalive.txt
+            git commit -m "Keep the 6-hourly schedule alive"
+            git push
+          fi
