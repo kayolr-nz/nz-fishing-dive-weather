@@ -1,8 +1,9 @@
 // Fish & Dive Nz — rain forecast pictures from DWD's ICON global model (13 km, free, credit "DWD/ICON").
 // Run by .github/workflows/rain.yml every 6 hours; the result goes on GitHub Pages:
 //   out/rain.json                       which run, the times, the grid of each region
-//   out/r/<run>/<region>/<step>.gz      one gzipped picture per hour: rows × cols bytes of rain, then rows × cols bytes of snow share
-// Rain byte = round(40 × √(mm/h)) (0 = dry, 255 ≈ 40 mm/h); snow byte = 255 × (snow ÷ all precipitation).
+//   out/r/<run>/<region>/<step>.gz      one gzipped picture per hour: rows × cols bytes of rain, then snow share, then temperature
+// Rain byte = round(40 × √(mm/h)) (0 = dry, 255 ≈ 40 mm/h); snow byte = 255 × (snow ÷ all precipitation);
+// temperature byte = round(2 × (°C + 40)) at 2 m at that time (0 = none) — for the town labels.
 // Needs Node 18+ and the `bzip2` command. Usage: node make-rain.mjs [YYYYMMDDHH] [--steps 6]
 
 import fs from "fs";
@@ -55,7 +56,7 @@ async function latestRun() {
     const t = new Date(Math.floor(now / 21600000) * 21600000 - back * 21600000);
     const run = t.toISOString().slice(0, 13).replace(/[-T]/g, "");
     const last = STEPS[STEPS.length - 1];
-    const ok = await Promise.all(["TOT_PREC", "SNOW_GSP", "SNOW_CON"].map((v) => fetch(fileUrl(run, v, last), { method: "HEAD" }).then((r) => r.ok, () => false)));
+    const ok = await Promise.all(["TOT_PREC", "SNOW_GSP", "SNOW_CON", "T_2M"].map((v) => fetch(fileUrl(run, v, last), { method: "HEAD" }).then((r) => r.ok, () => false)));
     if (ok.every(Boolean)) return run;
   }
   throw new Error("no complete ICON run found");
@@ -139,7 +140,7 @@ async function main() {
   for (const k of Object.keys(REGIONS)) fs.mkdirSync(path.join(dir, k), { recursive: true });
 
   // download a few steps ahead while working on the current one
-  const load = (step) => Promise.all(["TOT_PREC", "SNOW_GSP", "SNOW_CON"].map((v) => field(run, v, step)));
+  const load = (step) => Promise.all(["TOT_PREC", "SNOW_GSP", "SNOW_CON", "T_2M"].map((v) => field(run, v, step)));
   const queue = new Map();
   const want = (i) => i < STEPS.length && !queue.has(i) && queue.set(i, load(STEPS[i]));
   let prev = null, prevStep = 0;
@@ -147,7 +148,7 @@ async function main() {
   let bytes = 0;
   for (let i = 0; i < STEPS.length; i++) {
     for (let a = 0; a < 6; a++) want(i + a);
-    const [tot, sg, sc] = await queue.get(i);
+    const [tot, sg, sc, t2] = await queue.get(i);
     queue.delete(i);
     const step = STEPS[i];
     const hours = step - prevStep;
@@ -161,11 +162,12 @@ async function main() {
     }
     for (const [k, R] of Object.entries(REGIONS)) {
       const size = R.rows * R.cols;
-      const rr = regrid(rate, maps[k], size), ss = regrid(snow, maps[k], size);
-      const buf = new Uint8Array(size * 2);
+      const rr = regrid(rate, maps[k], size), ss = regrid(snow, maps[k], size), tt = regrid(t2, maps[k], size);
+      const buf = new Uint8Array(size * 3);
       for (let s = 0; s < size; s++) {
         buf[s] = rr[s] < 0.02 ? 0 : Math.min(255, Math.round(40 * Math.sqrt(rr[s])));
         buf[size + s] = buf[s] ? Math.round(255 * ss[s]) : 0;
+        buf[2 * size + s] = Math.min(255, Math.max(1, Math.round(2 * (tt[s] - 273.15 + 40)))); // kelvin → °C
       }
       const gz = zlib.gzipSync(buf, { level: 9 });
       bytes += gz.length;
@@ -186,6 +188,8 @@ async function main() {
     regions: REGIONS,
     rain: "mm/h = (byte / 40)²",
     snow: "share = byte / 255",
+    planes: 3, // rain, snow, temperature
+    temp: "°C = byte / 2 − 40",
   };
   fs.writeFileSync(path.join(OUT, "rain.json"), JSON.stringify(manifest));
   console.log("done:", STEPS.length, "steps,", (bytes / 1e6).toFixed(1), "MB");
